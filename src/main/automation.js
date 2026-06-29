@@ -7,8 +7,17 @@ let running = false;
 let queue = null;
 let browsers = [];
 
+// Fisher-Yates shuffle algorithm
+function shuffleArray(array) {
+	const newArray = [...array];
+	for (let i = newArray.length - 1; i > 0; i--) {
+		const j = Math.floor(Math.random() * (i + 1));
+		[newArray[i], newArray[j]] = [newArray[j], newArray[i]];
+	}
+	return newArray;
+}
+
 async function start(config, emit) {
-	// Dynamic import for ESM p-queue
 	const { default: PQueue } = await import("p-queue");
 
 	running = true;
@@ -26,6 +35,13 @@ async function start(config, emit) {
 	queue = new PQueue({ concurrency: concurrency || 2 });
 
 	let completed = 0;
+	
+	// Prepare proxies: shuffle them
+	let proxyPool = [];
+	if (proxyList && proxyList.length > 0) {
+		proxyPool = shuffleArray(proxyList);
+	}
+
 	let proxyIndex = 0;
 
 	for (let i = 0; i < visits && running; i++) {
@@ -35,11 +51,21 @@ async function start(config, emit) {
 			if (!running) return;
 
 			let proxy;
-			if (proxyList && proxyList.length > 0) {
-				const raw = proxyManager.pickProxy(proxyList, proxyIndex++);
+			let proxyInfo = "none";
+			
+			// Get next proxy from shuffled pool
+			if (proxyPool.length > 0) {
+				const raw = proxyPool[proxyIndex % proxyPool.length];
 				proxy = proxyManager.buildPlaywrightProxy(raw);
+				if (proxy) {
+					proxyInfo = proxy.server;
+				}
+				proxyIndex++;
 			} else {
 				proxy = proxyManager.buildPlaywrightProxy(proxyConfig);
+				if (proxy) {
+					proxyInfo = proxy.server;
+				}
 			}
 
 			const ua = human.randomUserAgent();
@@ -78,18 +104,26 @@ async function start(config, emit) {
 					referer: referrer || undefined,
 				});
 
+				// More realistic behavior for analytics
 				await human.sleep(800, 2000);
 				await human.moveMouseNaturally(page);
 				await human.sleep(500, 1500);
 				await human.scrollNaturally(page);
 				await human.hoverRandomLinks(page);
+				
+				// Additional realistic behavior
+				await page.evaluate(() => {
+					// Simulate some random mouse movements
+					window.scrollBy({ top: Math.random() * 100, left: 0, behavior: 'smooth' });
+				});
+				
 				await human.sleep(minDelay || 2000, maxDelay || 6000);
 
 				completed++;
 				db.logVisit({
 					url: pageUrl,
 					ua,
-					proxy: proxy?.server || "none",
+					proxy: proxyInfo,
 					status: "ok",
 				});
 				emit("visit", {
@@ -97,12 +131,13 @@ async function start(config, emit) {
 					completed,
 					total: visits,
 					status: "ok",
+					proxy: proxyInfo,
 				});
 			} catch (err) {
 				db.logVisit({
 					url: pageUrl,
 					ua: ua || "",
-					proxy: proxy?.server || "none",
+					proxy: proxyInfo,
 					status: "error",
 					error: err.message,
 				});
@@ -112,7 +147,11 @@ async function start(config, emit) {
 					total: visits,
 					status: "error",
 					error: err.message,
+					proxy: proxyInfo,
 				});
+				
+				// Stop automation on errors
+				await stop();
 			} finally {
 				try {
 					await browser?.close();
